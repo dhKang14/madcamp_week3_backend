@@ -43,6 +43,7 @@ class User(db.Model):
     email = db.Column(db.String(255), unique=True, nullable=False)
     nickname = db.Column(db.String(50), nullable=False)
     password = db.Column(db.String(255), nullable=False)
+    imageurl = db.Column(db.String(255)) 
     # User 모델과 UserSong 모델 간의 관계 정의
     user_songs = db.relationship('UserSong', back_populates='user')
 
@@ -77,6 +78,7 @@ class UserSong(db.Model):
 
 # 채팅 메시지 모델
 class ChatMessage(db.Model):
+    __tablename__ = 'chatmessage'
     id = db.Column(db.Integer, primary_key=True)
     room_id = db.Column(db.String(50))
     user_id = db.Column(db.String(50))
@@ -85,15 +87,12 @@ class ChatMessage(db.Model):
 
 # 채팅방 모델
 class ChatRoom(db.Model):
+    __tablename__ = 'chatroom'
     id = db.Column(db.String(50), primary_key=True)
     name = db.Column(db.String(50))
 
 
 
-
-@app.route('/')
-def hello_world():
-    return 'Hello, World!'
 
 
 
@@ -142,7 +141,7 @@ def login():
         # 사용자 정보를 세션에 저장
         session['user_id'] = user.user_id
         # 로그인 성공 시 사용자 프로필 반환
-        return jsonify({'message': '로그인 성공', 'user': {'user_id': user.user_id, 'email': user.email, 'nickname': user.nickname}})
+        return jsonify({'message': '로그인 성공', 'user': {'user_id': user.user_id, 'email': user.email, 'nickname': user.nickname, 'imageurl':user.imageurl}})
     else:
         # 로그인 실패 시 null 반환
         return jsonify({'error': '로그인 실패'}), 401
@@ -162,6 +161,20 @@ def logout():
         return jsonify({'error': str(e)}), 500
 
 
+#사진등록
+@app.route('/upload_image/<user_id>', methods=['PUT'])
+def upload_image(user_id):
+    user = User.query.filterby(user_id=user_id).first()
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    data = request.json
+    if 'imageurl' in data:
+        user.imageurl = data['imageurl']
+        db.session.commit()
+        return jsonify({'message': 'Image URL updated successfully'}), 200
+    else:
+        return jsonify({'message': 'Image URL not provided in request'}), 400
 
 
 
@@ -170,8 +183,8 @@ def logout():
 @app.route('/users', methods=['GET'])
 def get_profile():
     try:
-        data = request.json
-        user_id = data.get('user_id')
+        # GET 요청의 쿼리 파라미터에서 user_id를 가져옵니다.
+        user_id = request.args.get('user_id')
         # user_id에 해당하는 유저 프로필 데이터 조회
         user = User.query.get(user_id)
 
@@ -182,12 +195,14 @@ def get_profile():
         user_data = {
             'user_id': user.user_id,
             'email': user.email,
-            'nickname': user.nickname
+            'nickname': user.nickname,
+            'imageurl':user.imageurl
         }
 
         return jsonify(user_data)
 
     except Exception as e:
+        print(e)
         return jsonify({'error': str(e)}), 500
 
 
@@ -656,7 +671,6 @@ font_path = '/root/NanumSquareRoundR.ttf'
 # 폰트를 로드합니다.
 font_name = font_manager.FontProperties(fname=font_path).get_name()
 rc('font', family=font_name)
-
 # 이번 달에 해당하는 사용자의 노래 재생 기록 가져오기
 def month_genre(user_id):
     try:
@@ -837,7 +851,7 @@ def get_chat_rooms():
     return jsonify(rooms)
 
 
-
+#채팅방에 들어가자마자, 
 # 라우트: 특정 채팅방의 메시지를 가져오기
 @app.route('/chat/messages/<room_id>', methods=['GET'])
 def get_chat_messages(room_id):
@@ -846,7 +860,7 @@ def get_chat_messages(room_id):
     return jsonify(messages_data)
 
 
-
+# 특정 채팅방 메세지 내용 저장
 
 # WebSocket 이벤트: 클라이언트에서 새 메시지를 보낼 때
 @socketio.on('new_message')
