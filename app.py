@@ -66,6 +66,7 @@ class UserSong(db.Model):
     genre = db.Column(db.String(255))
     year = db.Column(db.Integer, nullable=False)  # 연도 정보를 저장할 컬럼 추가
     month = db.Column(db.Integer, nullable=False)  # 월 정보를 저장할 컬럼 추가
+    week = db.Column(db.Integer, nullable=False) 
 
     # UserSong 모델과 User 모델 간의 관계 정의
     user = db.relationship('User', back_populates='user_songs')
@@ -229,22 +230,22 @@ def generate_song_analysis(songs):
     try:
         # GPT-4를 사용하여 노래 취향 분석 및 추천 생성
         message = [
-            {"role": "system", "content": "You are a music analysis and recommendation system."},
-            {"role": "user", "content": "내 보관함에 있는 노래 목록:"}
+            {"role": "system", "content": "You are a music analysis and recommendation system."}
         ]
         for song in songs:
             message.append({"role": "user", "content": f"{song['singer_name']} - {song['song_title']}"})
-        message.append({"role": "user", "content": "내가 좋아하는 노래들을 분석해서 내 노래 취향을 세개의 해시태그로 나타내주세요. 세개의 해시태그 외에 다른말은 쓰지 말고, 답변을 다음과 같은 형식으로 써주세요. ex)#발라드, #휴식, #감성적"})
+        message.append({"role": "user", "content": "내가 좋아하는 노래들을 분석해서 내 노래 취향을 세개의 해시태그로 나타내주세요. 세개의 해시태그 외에 다른말은 절대로 쓰지 말고, 답변을 다음과 같은 형식으로 써주세요. ex)#발라드, #휴식, #감성적"})
 
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",
             messages=message,
             max_tokens=100
         )
+
+        print(response)
         return response.choices[0].message["content"].strip()
     except Exception as e:
         return str(e)
-
 
 
 
@@ -253,14 +254,15 @@ def find_similar_songs(hashtags):
         # 세 개의 해시태그를 사용하여 ChatGPT-4에게 명령
         message = [
             {"role": "system", "content": "You are a music recommendation system."},
-            {"role": "user", "content": f"세 개의 해시태그로 비슷한 느낌의 노래 두 개를 추천해주세요: {' '.join(hashtags)} 두개의 노래 외에 다른 말은 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지, 폴킴-너를 만나 "}
+            {"role": "user", "content": f"세 개의 해시태그로 비슷한 느낌의 노래 두 개를 추천해주세요: {' '.join(hashtags)} 두개의 노래 외에 다른 말은 절대로 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지\n폴킴-너를 만나 "}
         ]
 
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",
             messages=message,
             max_tokens=100
         )
+        print(response)
         return response.choices[0].message["content"].strip()
     except Exception as e:
         return str(e)
@@ -285,7 +287,7 @@ def analyze_recommend_songs():
         similar_songs = find_similar_songs(hashtags)
 
         #similar_songs 두 개로 분할
-        songs_list=similar_songs.split(", ")[:2]
+        songs_list = similar_songs.split("\n")[:2]
 
         # 가수와 노래 제목을 저장할 리스트
         songs_info = []
@@ -430,26 +432,47 @@ def letmeknow_genre(song_title, singer_name):
 def play_song():
     data = request.json
     user_id = data.get('user_id')
-    song_title=data.get('song_title')
-    singer_name=data.get('singer_name')
-    genre=letmeknow_genre(data.get('song_title'), data.get('singer_name'))
-
+    song_title = data.get('song_title')
+    singer_name = data.get('singer_name')
+    genre = letmeknow_genre(data.get('song_title'), data.get('singer_name'))
+    
     if not user_id or not song_title or not singer_name:
         return jsonify({'error': '사용자 ID와 노래 ID를 모두 입력하세요.'}), 400
 
-    # UserSong 테이블에 노래를 추가하고 play_count를 증가시킴
-    user_song = UserSong.query.filter_by(user_id=user_id, song_title=song_title, singer_name=singer_name).first()
+    # 현재 날짜 및 시간 정보 가져오기
+    current_date = datetime.utcnow()
+
+    # 현재 년도, 월, 주(Week) 정보 가져오기
+    current_year = current_date.year
+    current_month = current_date.month
+    current_week = current_date.isocalendar()[1]  # ISO 주(Week) 정보
+
+    # UserSong 테이블에 기존 레코드 조회
+    user_song = UserSong.query.filter_by(
+        user_id=user_id, 
+        song_title=song_title, 
+        singer_name=singer_name, 
+        year=current_year,
+        month=current_month,
+        week=current_week
+    ).first()
+
     if user_song:
+        # 이미 같은 년도, 월, 주에 해당 노래를 들었다면 play_count만 증가
         user_song.play_count += 1
-        user_song.genre=genre
+        user_song.genre = genre
     else:
+        # 새로운 주(Week)에 해당 노래를 듣는 경우, 새로운 레코드 추가
         new_user_song = UserSong(
             user_id=user_id, 
             song_title=song_title, 
             singer_name=singer_name, 
             play_count=1,
-            date=datetime.utcnow(),  # 현재 날짜 및 시간을 저장
-            genre=genre  # 장르 정보를 저장)
+            year=current_year,
+            month=current_month,
+            week=current_week,
+            date=current_date,
+            genre=genre
         )
         db.session.add(new_user_song)
     
@@ -463,7 +486,10 @@ def play_song():
         return jsonify({'error': '노래 재생 기록 추가 실패'}), 500
 
 
-#user별 총 음악들은 횟수 반환
+
+#월별로 볼수있게->month 선택할 수 있게 
+    
+#월간로그-특정 user_id 사용자가 총 음악들은 횟수 반환
 def get_total_play_count(user_id):
     try:
         # 특정 user_id에 해당하는 사용자의 모든 노래의 play_count 합계를 쿼리로 계산
@@ -475,13 +501,17 @@ def get_total_play_count(user_id):
 
 
 
-# 특정 user_id 사용자가 많이 들은 가수
+#월간로그-특정 user_id 사용자가 많이 들은 가수
 @app.route('/most-listened-singer/<user_id>', methods=['GET'])
 def most_listened_singer(user_id):
     try:
-        # 특정 사용자가 가장 많이 들은 가수를 조회하는 쿼리
+        # 현재 연도와 월을 가져옵니다.
+        current_year = datetime.utcnow().year
+        current_month = datetime.utcnow().month
+
+        # 특정 사용자가 현재 월에 가장 많이 들은 가수를 조회하는 쿼리
         result = db.session.query(UserSong.singer_name, func.sum(UserSong.play_count).label('total_play_count')) \
-            .filter_by(user_id=user_id) \
+            .filter_by(user_id=user_id, year=current_year, month=current_month) \
             .group_by(UserSong.singer_name) \
             .order_by(func.sum(UserSong.play_count).desc()) \
             .first()
@@ -495,17 +525,81 @@ def most_listened_singer(user_id):
             }
             return jsonify(response)
         else:
-            return jsonify({'message': '사용자가 음악을 듣지 않았거나 데이터가 없습니다.'}), 404
+            return jsonify({'message': '사용자가 이번 달에 음악을 듣지 않았거나 데이터가 없습니다.'}), 404
+
+    except Exception as e:
+        return jsonify({'error': '서버 오류'}), 500
+
+
+#월간로그-특정 user_id 사용자가 많이 들은 장르
+@app.route('/most-listened-genre/<user_id>', methods=['GET'])
+def most_listened_genre(user_id):
+    try:
+        # 현재 연도와 월을 가져옵니다.
+        current_year = datetime.utcnow().year
+        current_month = datetime.utcnow().month
+
+        # 특정 사용자가 이번 달에 가장 많이 들은 장르를 조회하는 쿼리
+        result = db.session.query(UserSong.genre, func.sum(UserSong.play_count).label('total_play_count')) \
+            .filter_by(user_id=user_id, year=current_year, month=current_month) \
+            .group_by(UserSong.genre) \
+            .order_by(func.sum(UserSong.play_count).desc()) \
+            .first()
+
+        if result:
+            most_listened_genre, total_play_count = result
+            response = {
+                'user_id': user_id,
+                'most_listened_genre': most_listened_genre,
+                'total_play_count': total_play_count
+            }
+            return jsonify(response)
+        else:
+            return jsonify({'message': '사용자가 이번 달에 음악을 듣지 않았거나 데이터가 없습니다.'}), 404
+
+    except Exception as e:
+        return jsonify({'error': '서버 오류'}), 500
+
+
+#월간로그-특정 user_id 사용자의 최다감상곡
+# 이번 달 가장 많이 들은 최다 감상 곡 조회 API 엔드포인트
+@app.route('/most-listened-song/<user_id>', methods=['GET'])
+def most_listened_song(user_id):
+    try:
+        # 현재 연도와 월을 가져옵니다.
+        current_year = datetime.utcnow().year
+        current_month = datetime.utcnow().month
+
+        # 특정 사용자가 이번 달에 가장 많이 들은 곡을 조회하는 쿼리
+        result = db.session.query(UserSong.singer_name, UserSong.song_title, func.sum(UserSong.play_count).label('total_play_count')) \
+            .filter_by(user_id=user_id, year=current_year, month=current_month) \
+            .group_by(UserSong.singer_name, UserSong.song_title) \
+            .order_by(func.sum(UserSong.play_count).desc()) \
+            .first()
+
+        if result:
+            singer_name, song_title, total_play_count = result
+            response = {
+                'user_id': user_id,
+                'most_listened_song': f'{singer_name} - {song_title}',
+                'total_play_count': total_play_count
+            }
+            return jsonify(response)
+        else:
+            return jsonify({'message': '사용자가 이번 달에 음악을 듣지 않았거나 데이터가 없습니다.'}), 404
 
     except Exception as e:
         return jsonify({'error': '서버 오류'}), 500
 
 
 
-
 #월간 장르 통계
+    
 
+#주간 장르 통계
+    
 
+#채팅방
 
 
 
