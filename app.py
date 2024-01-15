@@ -1,3 +1,4 @@
+import os
 from sqlite3 import IntegrityError
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
 from flask_cors import CORS
@@ -359,6 +360,23 @@ def generate_lyrics_and_chord():
 
 
 #gpt-c 앨범커버 생성
+# 이미지 URL 생성 함수
+def generate_image_url(genre, favorite_song, favorite_artist):
+    try:
+        prompt = (f"장르: {genre}\n"
+                  f"좋아하는 노래: {favorite_song} by {favorite_artist}\n"
+                  f"기반하여 이미지를 생성해주세요.\n\n")
+        response = openai.Image.create(
+            model="dall-e-3",  # 모델을 'dall-e-3'로 설정
+            prompt=prompt,
+            n=1  # 생성할 이미지 수
+        )
+        image_url = response['data'][0]['url']
+        return image_url
+    except Exception as e:
+        return str(e)
+
+# 이미지 생성 API 엔드포인트
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
     data = request.json
@@ -370,23 +388,11 @@ def generate_image():
         return jsonify({'error': '장르, 좋아하는 노래 제목, 가수를 모두 입력하세요.'}), 400
 
     try:
-        prompt = (f"장르: {genre}\n"
-                  f"좋아하는 노래: {favorite_song} by {favorite_artist}\n"
-                  f"기반하여 이미지를 생성해주세요.\n\n")
-        response = openai.Image.create(
-            model="dall-e-3",  # 모델을 'dall-e-3'로 설정
-            prompt=prompt,
-            n=1  # 생성할 이미지 수
-        )
-        image_url = response['data'][0]['url']
-        
-        # 이미지 URL에서 이미지 데이터를 가져오기
-        response = requests.get(image_url)
-        image = BytesIO(response.content)
-
-        return send_file(image, mimetype='image/jpeg')
+        image_url = generate_image_url(genre, favorite_song, favorite_artist)
+        return jsonify({'image_url': image_url})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 
 
@@ -594,7 +600,89 @@ def most_listened_song(user_id):
 
 
 #월간 장르 통계
+
+# 이번 달에 해당하는 사용자의 노래 재생 기록 가져오기
+def month_genre(user_id):
+    try:
+        current_year = datetime.utcnow().year
+        current_month = datetime.utcnow().month
+
+        user_songs = UserSong.query.filter_by(
+            user_id=user_id,
+            year=current_year,
+            month=current_month
+        ).all()
+
+        if not user_songs:
+            return jsonify({'error': '이번 달에 들은 노래가 없습니다.'}), 404
+
+        genre_counts = {}
+        total_play_count = 0
+
+        for song in user_songs:
+            total_play_count += song.play_count
+            if song.genre:
+                if song.genre in genre_counts:
+                    genre_counts[song.genre] += song.play_count
+                else:
+                    genre_counts[song.genre] = song.play_count
+
+        # 각 장르별 비율을 계산하고 스케일링하여 합을 100%로 조절
+        total_scaled_ratio = 0
+        scaled_genre_ratio = {}
+        for genre, count in genre_counts.items():
+            ratio = (count / total_play_count) * 100
+            scaled_ratio = round(ratio, 2)  # 원하는 소수점 자릿수로 반올림
+            scaled_genre_ratio[genre] = scaled_ratio
+            total_scaled_ratio += scaled_ratio
+
+        # 합을 다시 계산하여 100%인지 확인하고 조절
+        if total_scaled_ratio != 100:
+            scaling_factor = 100 / total_scaled_ratio
+            for genre, ratio in scaled_genre_ratio.items():
+                scaled_genre_ratio[genre] = round(ratio * scaling_factor, 2)
+        print('genre_ratio')
+        return {'genre_ratio': scaled_genre_ratio}
+    except Exception as e:
+        print(str(e))
+        return {'error': '장르 비율을 가져오는 동안 오류가 발생했습니다.'}
+
+
+#월간 파이차트 생성
+#월간 파이차트 생성
+@app.route('/month-genre-chart')
+def month_genre_chart():
+    data = request.json
+    user_id = data.get('user_id')
+    genre_data = month_genre(user_id)
     
+    if 'error' in genre_data:
+        return genre_data['error'], 404
+
+    # 장르와 비율을 분리하여 리스트로 저장
+    labels = list(genre_data['genre_ratio'].keys())
+    sizes = list(genre_data['genre_ratio'].values())
+
+    # 파이 차트 생성
+    fig, ax = plt.subplots()
+    ax.pie(sizes, labels=labels, autopct='%1.1f%%', labeldistance=0.5)  # labeldistance 조정
+    ax.axis('equal')  # 원형을 유지
+
+    # 이미지 파일로 저장
+    image_name = f"user_{user_id}_chart.png"
+    image_path = os.path.join('static', 'images', image_name)
+    plt.savefig(image_path, format='png', bbox_inches='tight', pad_inches=0, transparent=True)  # 배경 투명 설정
+
+    # 이미지 URL 생성 및 반환
+    image_url = url_for('static', filename=f'images/{image_name}', _external=True)
+    return jsonify({'image_url': image_url})
+
+
+
+    
+
+
+
 
 #주간 장르 통계
     
