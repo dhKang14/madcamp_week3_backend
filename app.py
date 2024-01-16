@@ -20,6 +20,11 @@ from datetime import datetime
 from sqlalchemy import func
 from matplotlib import font_manager, rc
 from flask_socketio import SocketIO, emit
+from sqlalchemy.orm import Session
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import time
+
 
 
 app = Flask(__name__)
@@ -28,7 +33,7 @@ app.secret_key = 'your_secret_key'  # 세션을 위한 시크릿 키 설정?????
 CORS(app)
 
 # OpenAI API 키 설정 (API 키는 https://platform.openai.com/signup 에서 얻을 수 있음)
-openai.api_key = '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'
+openai.api_key = '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'
 
 
 
@@ -122,6 +127,7 @@ def register():
         db.session.rollback()
         return jsonify({'error': '이미 존재하는 이메일 또는 사용자 아이디입니다.'}), 400
     except Exception as e:
+        print(e)
         db.session.rollback()
         return jsonify({'error': '회원가입 실패'}), 500
 
@@ -164,17 +170,21 @@ def logout():
 #사진등록
 @app.route('/upload_image/<user_id>', methods=['PUT'])
 def upload_image(user_id):
-    user = User.query.filterby(user_id=user_id).first()
-    if not user:
-        return jsonify({'message': 'User not found'}), 404
+    try:
+        user = User.query.filter_by(user_id=user_id).first()
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
 
-    data = request.json
-    if 'imageurl' in data:
-        user.imageurl = data['imageurl']
-        db.session.commit()
-        return jsonify({'message': 'Image URL updated successfully'}), 200
-    else:
-        return jsonify({'message': 'Image URL not provided in request'}), 400
+        data = request.json
+        if 'imageurl' in data:
+            user.imageurl = data['imageurl']
+            db.session.commit()
+            return jsonify({'message': 'Image URL updated successfully'}), 200
+        else:
+            return jsonify({'message': 'Image URL not provided in request'}), 400
+    except Exception as e:
+        print(e)
+        return jsonify({'error': str(e)}), 500
 
 
 
@@ -186,7 +196,7 @@ def get_profile():
         # GET 요청의 쿼리 파라미터에서 user_id를 가져옵니다.
         user_id = request.args.get('user_id')
         # user_id에 해당하는 유저 프로필 데이터 조회
-        user = User.query.get(user_id)
+        user = User.query.filter_by(user_id=user_id).first()
 
         if user is None:
             return jsonify({'error': '유저를 찾을 수 없습니다.'}), 404
@@ -257,6 +267,10 @@ def get_favorite_songs():
 
 
 
+# Spotify API 인증 정보 설정
+client_id = 'c10281084ac24836b9c6e5748611b9fb'
+client_secret = 'da38a160e71a4d8f93beab376d905c3e'
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=client_id, client_secret=client_secret))
 
 
 #노래 취향 분석
@@ -266,42 +280,69 @@ def generate_song_analysis(songs):
     try:
         # GPT-4를 사용하여 노래 취향 분석 및 추천 생성
         message = [
-            {"role": "system", "content": "You are a music analysis and recommendation system."}
+            {"role": "system", "content": "You are a music analysis model."}
         ]
         for song in songs:
-            message.append({"role": "user", "content": f"{song['singer_name']} - {song['song_title']}"})
-        message.append({"role": "user", "content": "내가 좋아하는 노래들을 분석해서 내 노래 취향을 세개의 해시태그로 나타내주세요. 세개의 해시태그 외에 다른말은 절대로 쓰지 말고, 답변을 다음과 같은 형식으로 써주세요. ex)#발라드, #휴식, #감성적"})
+            singer_name = song.singer_name  # 가수 이름 가져오기
+            song_title = song.song_title  # 노래 제목 가져오기
+            message.append({"role": "user", "content": f"{singer_name} - {song_title}"})
+        message.append({"role": "user", "content": "내가 좋아하는 노래들입니다. 내가 좋아하는 노래들을 분석해서 내 노래 취향을 세개의 해시태그로 나타내주세요.\
+                         세개의 해시태그 외에 다른말은 절대로 쓰지 말고, 답변을 다음과 같은 형식으로 써주세요. ex)#발라드, #휴식, #감성적"})
 
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",
             messages=message,
-            max_tokens=100
+            max_tokens=150
         )
 
-        print(response)
         return response.choices[0].message["content"].strip()
     except Exception as e:
         return str(e)
 
+
+# Spotify API를 사용하여 song ID를 가져오기
+songs_info = []
 
 
 def find_similar_songs(hashtags):
     try:
-        # 세 개의 해시태그를 사용하여 ChatGPT-4에게 명령
-        message = [
-            {"role": "system", "content": "You are a music recommendation system."},
-            {"role": "user", "content": f"세 개의 해시태그로 비슷한 느낌의 노래 두 개를 추천해주세요: {' '.join(hashtags)} 두개의 노래 외에 다른 말은 절대로 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지\n폴킴-너를 만나 "}
-        ]
+        # 이미 두 곡을 찾은 경우 종료
+        if len(songs_info) == 2:
+            return
 
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=message,
-            max_tokens=100
-        )
-        print(response)
-        return response.choices[0].message["content"].strip()
+        while len(songs_info) < 2:
+            # ChatGPT-4에게 비슷한 노래 찾기 명령 전달
+            message = [
+                {"role": "system", "content": "You are a music recommendation system."},
+                {"role": "user", "content": f"이 세 개의 해시태그로 비슷한 느낌의 노래 한 곡을 찾아주세요: {' '.join(hashtags)} \
+                 가수 이름과 제목 외에 다른 말은 절대로 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지\
+                 외국 노래는 반드시 가수 이름과 노래 제목을 영어로 써주세요 "}
+            ]
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=message,
+                max_tokens=100
+            )
+            similar_song = response.choices[0].message["content"].strip()
+
+            parts = similar_song.split("-")
+            if len(parts) == 2:
+                artist, title = parts[0].strip(), parts[1].strip()
+                # Spotify에서 곡을 검색하고 첫 번째 결과의 song ID를 가져옴
+                results = sp.search(q=f"artist:{artist} track:{title}", type='track', limit=1)
+                if results and results['tracks']['items']:
+                    song_id = results['tracks']['items'][0]['id']
+                    # 중복된 곡이 아닌 경우에만 추가
+                    if not any(info['song_id'] == song_id for info in songs_info):
+                        songs_info.append({'artist': artist, 'title': title, 'song_id': song_id})
+                else:
+                    # 비슷한 노래를 찾지 못한 경우 재시도
+                    continue  # 다시 반복
+
     except Exception as e:
-        return str(e)
+        print(str(e))
+
+    
 
 
 # 사용자의 노래 취향을 분석하고 추천을 생성하는 API 엔드포인트
@@ -311,6 +352,8 @@ def analyze_recommend_songs():
     user_id = data.get('user_id')
     favorite_songs = FavoriteSong.query.filter_by(user_id=user_id).all()  # 사용자가 보관한 노래 목록
 
+    # 라우트 요청마다 songs_info 초기화
+    songs_info.clear()
 
     try:
         # GPT-4를 사용하여 노래 취향을 분석하고 해시태그 생성
@@ -320,20 +363,7 @@ def analyze_recommend_songs():
         hashtags = song_analysis.split(", ")[:3]
 
         # 비슷한 느낌의 노래를 찾는 로직을 통해 추천 노래 생성
-        similar_songs = find_similar_songs(hashtags)
-
-        #similar_songs 두 개로 분할
-        songs_list = similar_songs.split("\n")[:2]
-
-        # 가수와 노래 제목을 저장할 리스트
-        songs_info = []
-
-        # 각 곡에 대해 가수와 노래 제목을 분리하여 저장
-        for song in songs_list:
-            parts = song.split("-")
-            if len(parts) == 2:
-                artist, title = parts[0].strip(), parts[1].strip()
-                songs_info.append({'artist': artist, 'title': title})
+        find_similar_songs(hashtags)
 
         # JSON 응답에 가수와 노래 정보를 추가
         response_data = {
@@ -375,7 +405,7 @@ def generate_lyrics_and_chord():
             {"role": "system", "content": "You are a helpful assistant that generates lyrics and chords."},
             {"role": "user", "content": f"장르: {genre}\n\
              좋아하는 노래: {favorite_song} by {favorite_artist}\n\
-            기반하여 새로운 노래의 가사를 제안해주세요. 다른 그 어떤 말도 없이, 가사만 주세요. 앞뒤 설명도 하지 마세요.\n\n"}
+            기반하여 새로운 노래의 가사를 제안해주세요. 다른 그 어떤 말도 없이, 코드없이, 가사만 주세요. 앞뒤 설명도 하지 마세요.\n\n"}
         ]
         # 코드진행 생성을 위한 message
         chord_message = [
