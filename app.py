@@ -1,6 +1,6 @@
 import os
 from sqlite3 import IntegrityError
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_cors import CORS
 import requests
 import openai
@@ -24,23 +24,27 @@ from sqlalchemy.orm import Session
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import time
-
-
+from flask_cors import CORS
+import base64
+from PIL import Image
+from io import BytesIO
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # 세션을 위한 시크릿 키 설정???????
 # CORS 설정
 CORS(app)
+socketio = SocketIO(app)
+SAVE_DIR = "./uploads/"
 
 # OpenAI API 키 설정 (API 키는 https://platform.openai.com/signup 에서 얻을 수 있음)
-openai.api_key = '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'
+openai.api_key = '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'
 
 
 
 # MySQL 데이터베이스 연결 설정
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:madmad@localhost/music_database'
 db = SQLAlchemy(app)
-socketio = SocketIO(app)
+
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -48,7 +52,7 @@ class User(db.Model):
     email = db.Column(db.String(255), unique=True, nullable=False)
     nickname = db.Column(db.String(50), nullable=False)
     password = db.Column(db.String(255), nullable=False)
-    imageurl = db.Column(db.String(255)) 
+    imageurl = db.Column(db.String(1000)) 
     # User 모델과 UserSong 모델 간의 관계 정의
     user_songs = db.relationship('UserSong', back_populates='user')
 
@@ -81,24 +85,13 @@ class UserSong(db.Model):
     # UserSong 모델과 User 모델 간의 관계 정의
     user = db.relationship('User', back_populates='user_songs')
 
-# 채팅 메시지 모델
-class ChatMessage(db.Model):
-    __tablename__ = 'chatmessage'
+
+# 모델 정의 - 게시물
+class Post(db.Model):
+    __tablename__ = 'post'
     id = db.Column(db.Integer, primary_key=True)
-    room_id = db.Column(db.String(50))
-    user_id = db.Column(db.String(50))
-    message = db.Column(db.String(500))
-    timestamp = db.Column(db.DateTime)
-
-# 채팅방 모델
-class ChatRoom(db.Model):
-    __tablename__ = 'chatroom'
-    id = db.Column(db.String(50), primary_key=True)
-    name = db.Column(db.String(50))
-
-
-
-
+    user_id = db.Column(db.String(50), db.ForeignKey('users.user_id'))
+    content = db.Column(db.Text, nullable=False)
 
 
 # 회원가입 API 엔드포인트
@@ -188,7 +181,6 @@ def upload_image(user_id):
 
 
 
-
 #user 프로필 반환
 @app.route('/users', methods=['GET'])
 def get_profile():
@@ -214,6 +206,7 @@ def get_profile():
     except Exception as e:
         print(e)
         return jsonify({'error': str(e)}), 500
+
 
 
 
@@ -300,32 +293,31 @@ def generate_song_analysis(songs):
         return str(e)
 
 
-# Spotify API를 사용하여 song ID를 가져오기
-songs_info = []
 
 
 def find_similar_songs(hashtags):
     try:
-        # 이미 두 곡을 찾은 경우 종료
-        if len(songs_info) == 2:
-            return
+        # 세 개의 해시태그를 사용하여 ChatGPT-4에게 명령
+        message = [
+            {"role": "system", "content": "You are a music recommendation system."},
+            {"role": "user", "content": f"이 세 개의 해시태그로 비슷한 느낌의 노래 두 개를 찾아주세요: {' '.join(hashtags)} \
+             두개의 노래 외에 다른 말은 절대로 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지\n폴킴-너를 만나\
+             외국 노래는 반드시 가수이름과 노래 제목을 영어로 써주세요 "}
+        ]
 
-        while len(songs_info) < 2:
-            # ChatGPT-4에게 비슷한 노래 찾기 명령 전달
-            message = [
-                {"role": "system", "content": "You are a music recommendation system."},
-                {"role": "user", "content": f"이 세 개의 해시태그로 비슷한 느낌의 노래 한 곡을 찾아주세요: {' '.join(hashtags)} \
-                 가수 이름과 제목 외에 다른 말은 절대로 쓰지 말고, 반드시 다음과 같은 형식으로 써주세요. ex)아이유-밤편지\
-                 외국 노래는 반드시 가수 이름과 노래 제목을 영어로 써주세요 "}
-            ]
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=message,
-                max_tokens=100
-            )
-            similar_song = response.choices[0].message["content"].strip()
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=message,
+            max_tokens=100
+        )
+        similar_songs = response.choices[0].message["content"].strip()
 
-            parts = similar_song.split("-")
+        # Spotify API를 사용하여 song ID를 가져오기
+        songs_list = similar_songs.split("\n")[:2]
+        songs_info = []
+
+        for song in songs_list:
+            parts = song.split("-")
             if len(parts) == 2:
                 artist, title = parts[0].strip(), parts[1].strip()
                 # Spotify에서 곡을 검색하고 첫 번째 결과의 song ID를 가져옴
@@ -335,12 +327,18 @@ def find_similar_songs(hashtags):
                     # 중복된 곡이 아닌 경우에만 추가
                     if not any(info['song_id'] == song_id for info in songs_info):
                         songs_info.append({'artist': artist, 'title': title, 'song_id': song_id})
-                else:
-                    # 비슷한 노래를 찾지 못한 경우 재시도
-                    continue  # 다시 반복
+                    
+                    # songs_info에 2곡이 다 추가되면 for 루프 종료
+                    if len(songs_info) == 2:
+                        break
 
+        # 두 곡이 모두 찾아지지 않으면 재시도
+        if len(songs_info) != 2:
+            return find_similar_songs(hashtags)
+        else:
+            return songs_info
     except Exception as e:
-        print(str(e))
+        return str(e)
 
     
 
@@ -352,8 +350,7 @@ def analyze_recommend_songs():
     user_id = data.get('user_id')
     favorite_songs = FavoriteSong.query.filter_by(user_id=user_id).all()  # 사용자가 보관한 노래 목록
 
-    # 라우트 요청마다 songs_info 초기화
-    songs_info.clear()
+    
 
     try:
         # GPT-4를 사용하여 노래 취향을 분석하고 해시태그 생성
@@ -363,12 +360,12 @@ def analyze_recommend_songs():
         hashtags = song_analysis.split(", ")[:3]
 
         # 비슷한 느낌의 노래를 찾는 로직을 통해 추천 노래 생성
-        find_similar_songs(hashtags)
+        similar_songs=find_similar_songs(hashtags)
 
         # JSON 응답에 가수와 노래 정보를 추가
         response_data = {
             'hashtags': hashtags,
-            'similar_songs': songs_info
+            'similar_songs': similar_songs
         }
         return jsonify(response_data)  # 해시태그, 가수와 노래 제목 정보를 함께 반환
     except Exception as e:
@@ -567,7 +564,6 @@ def play_song():
     
     try:
         db.session.commit()
-        print(get_total_play_count(user_id))
         return jsonify({'message': '노래 재생 기록이 추가되었습니다.'}), 201
     except Exception as e:
         print(str(e))
@@ -582,8 +578,7 @@ def play_song():
 @app.route('/total-play-count', methods=['GET'])
 def get_total_play_count():
     try:
-        data = request.json
-        user_id = data.get('user_id')
+        user_id = request.args.get('user_id')
         current_year = datetime.utcnow().year
         current_month = datetime.utcnow().month
         # 특정 user_id에 해당하는 사용자의 모든 노래의 play_count 합계를 쿼리로 계산
@@ -600,8 +595,7 @@ def get_total_play_count():
 @app.route('/most-listened-singer', methods=['GET'])
 def most_listened_singer():
     try:
-        data = request.json
-        user_id = data.get('user_id')
+        user_id = request.args.get('user_id')
         # 현재 연도와 월을 가져옵니다.
         current_year = datetime.utcnow().year
         current_month = datetime.utcnow().month
@@ -632,8 +626,7 @@ def most_listened_singer():
 @app.route('/most-listened-genre', methods=['GET'])
 def most_listened_genre():
     try:
-        data = request.json
-        user_id = data.get('user_id')
+        user_id = request.args.get('user_id')
         # 현재 연도와 월을 가져옵니다.
         current_year = datetime.utcnow().year
         current_month = datetime.utcnow().month
@@ -665,8 +658,7 @@ def most_listened_genre():
 @app.route('/most-listened-song', methods=['GET'])
 def most_listened_song():
     try:
-        data = request.json
-        user_id = data.get('user_id')
+        user_id = request.args.get('user_id')
         # 현재 연도와 월을 가져옵니다.
         current_year = datetime.utcnow().year
         current_month = datetime.utcnow().month
@@ -694,16 +686,13 @@ def most_listened_song():
 
 
 
-#월간 장르 통계
-# 한글 폰트 설치 경로를 지정합니다. 실제 경로는 시스템에 따라 다를 수 있습니다.
-font_path = '/root/NanumSquareRoundR.ttf'
 
-# 폰트를 로드합니다.
-font_name = font_manager.FontProperties(fname=font_path).get_name()
-rc('font', family=font_name)
-# 이번 달에 해당하는 사용자의 노래 재생 기록 가져오기
-def month_genre(user_id):
+#월간 장르 통계
+@app.route('/month-genre',methods=['POST'])
+def month_genre():
     try:
+        data = request.json
+        user_id = data.get('user_id')
         current_year = datetime.utcnow().year
         current_month = datetime.utcnow().month
 
@@ -741,56 +730,21 @@ def month_genre(user_id):
             scaling_factor = 100 / total_scaled_ratio
             for genre, ratio in scaled_genre_ratio.items():
                 scaled_genre_ratio[genre] = round(ratio * scaling_factor, 2)
-        print('genre_ratio')
-        return {'genre_ratio': scaled_genre_ratio}
+        return jsonify({'genre_ratio': scaled_genre_ratio}), 200
     except Exception as e:
         print(str(e))
         return {'error': '장르 비율을 가져오는 동안 오류가 발생했습니다.'}
 
 
-    
-
-#정 안되면 프론트에서...
-#월간 파이차트 생성
-@app.route('/month-genre-chart',methods=['GET'])
-def month_genre_chart():
-    data = request.json
-    user_id = data.get('user_id')
-    genre_data = month_genre(user_id)
-    
-    if 'error' in genre_data:
-        return genre_data['error'], 404
-
-    # 장르와 비율을 분리하여 리스트로 저장
-    labels = list(genre_data['genre_ratio'].keys())
-    sizes = list(genre_data['genre_ratio'].values())
-
-    # 파이 차트 생성
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', labeldistance=0.5)  # labeldistance 조정
-    ax.axis('equal')  # 원형을 유지
-
-    # 이미지 파일로 저장
-    image_name = f"user_{user_id}_chart.png"
-    image_path = os.path.join('static', 'images', image_name)
-    plt.savefig(image_path, format='png', bbox_inches='tight', pad_inches=0, transparent=True)  # 배경 투명 설정
-
-    # 이미지 URL 생성 및 반환
-    image_url = url_for('static', filename=f'images/{image_name}', _external=True)
-    return jsonify({'image_url': image_url})
-
-
-
-
-
-
 
 
 #주간 장르 통계
-#주간 파이차트 생성
+@app.route('/week-genre',methods=['POST'])
 # 이번 달에 해당하는 사용자의 노래 재생 기록 가져오기
-def week_genre(user_id):
+def week_genre():
     try:
+        data = request.json
+        user_id = data.get('user_id')
         # 현재 날짜 및 시간 정보 가져오기
         current_date = datetime.utcnow()
 
@@ -834,78 +788,46 @@ def week_genre(user_id):
             scaling_factor = 100 / total_scaled_ratio
             for genre, ratio in scaled_genre_ratio.items():
                 scaled_genre_ratio[genre] = round(ratio * scaling_factor, 2)
-        print('genre_ratio')
-        return {'genre_ratio': scaled_genre_ratio}
+        return jsonify({'genre_ratio': scaled_genre_ratio}), 200
     except Exception as e:
         print(str(e))
         return {'error': '장르 비율을 가져오는 동안 오류가 발생했습니다.'}
 
 
 
-@app.route('/week-genre-chart', methods=['GET'])
-def week_genre_chart():
-    data = request.json
-    user_id = data.get('user_id')
-    genre_data = week_genre(user_id)
-    
-    if 'error' in genre_data:
-        return genre_data['error'], 404
-
-    # 장르와 비율을 분리하여 리스트로 저장
-    labels = list(genre_data['genre_ratio'].keys())
-    sizes = list(genre_data['genre_ratio'].values())
-
-    # 파이 차트 생성
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', labeldistance=0.5)  # labeldistance 조정
-    ax.axis('equal')  # 원형을 유지
-
-    # 이미지 파일로 저장
-    image_name = f"user_{user_id}_chart.png"
-    image_path = os.path.join('static', 'images', image_name)
-    plt.savefig(image_path, format='png', bbox_inches='tight', pad_inches=0, transparent=True)  # 배경 투명 설정
-
-    # 이미지 URL 생성 및 반환
-    image_url = url_for('static', filename=f'images/{image_name}', _external=True)
-    return jsonify({'image_url': image_url})
+#게시판
+@app.route('/add_post', methods=['POST'])
+def add_post():
+    data = request.get_json()
+    user_id=data.get('user_id')
+    content = data.get('content')
+    if content:
+        post = Post(user_id=user_id, content=content)
+        db.session.add(post)
+        db.session.commit()
+        return jsonify({'message': '게시글이 추가되었습니다.', 'post_id': post.id}), 201
+    else:
+        return jsonify({'error': '제목과 내용을 모두 입력하세요.'}), 400
 
 
-
-#채팅방
-
-# 라우트: 모든 채팅방 목록을 반환
-@app.route('/chat/rooms', methods=['GET'])
-def get_chat_rooms():
-    chat_rooms = ChatRoom.query.all()
-    rooms = [{'id': room.id, 'name': room.name} for room in chat_rooms]
-    return jsonify(rooms)
-
-
-#채팅방에 들어가자마자, 
-# 라우트: 특정 채팅방의 메시지를 가져오기
-@app.route('/chat/messages/<room_id>', methods=['GET'])
-def get_chat_messages(room_id):
-    messages = ChatMessage.query.filter_by(room_id=room_id).order_by(ChatMessage.timestamp).all()
-    messages_data = [{'user_id': msg.user_id, 'message': msg.message, 'timestamp': msg.timestamp} for msg in messages]
-    return jsonify(messages_data)
-
-
-# 특정 채팅방 메세지 내용 저장
-
-# WebSocket 이벤트: 클라이언트에서 새 메시지를 보낼 때
-@socketio.on('new_message')
-def handle_new_message(data):
-    room_id = data['room_id']
-    user_id = data['user_id']
-    message = data['message']
-    
-    # 메시지를 데이터베이스에 저장
-    new_message = ChatMessage(room_id=room_id, user_id=user_id, message=message)
-    db.session.add(new_message)
+@app.route('/delete_post', methods=['DELETE'])
+def delete_post():
+    data = request.get_json()
+    post_id = data.get('post_id')
+    post = Post.query.get(post_id)
+    if not post:
+        return jsonify({'error': '게시글을 찾을 수 없습니다.'}), 404
+    db.session.delete(post)
     db.session.commit()
-    
-    # 모든 클라이언트에게 실시간으로 메시지 전송
-    emit('receive_message', {'user_id': user_id, 'message': message, 'timestamp': new_message.timestamp}, room=room_id)
+    return jsonify({'message': '게시글이 삭제되었습니다.'})
+
+
+@app.route('/get_posts', methods=['GET'])
+def get_posts():
+    posts = Post.query.all()
+    post_list = [{'post_id':post.id, 'user_id':post.user_id, 'content': post.content} for post in posts]
+    return jsonify({'posts': post_list})
+
 
 
 
